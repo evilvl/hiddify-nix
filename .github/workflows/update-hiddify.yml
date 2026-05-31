@@ -1,0 +1,103 @@
+name: Update Hiddify (auto + build + auto-merge)
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl gh
+
+      - name: Get latest release
+        id: release
+        run: |
+          API="https://api.github.com/repos/hiddify/hiddify-app/releases/latest"
+
+          VERSION=$(curl -s $API | jq -r .tag_name)
+          URL="https://github.com/hiddify/hiddify-app/releases/download/${VERSION}/Hiddify-Linux-x64-AppImage.AppImage"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Download AppImage
+        run: |
+          curl -L "${{ steps.release.outputs.url }}" -o appimage
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Compute sha256
+        id: sha
+        run: |
+          SHA=$(nix hash file --type sha256 appimage)
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Check if changed
+        id: diff
+        run: |
+          NEW=$(jq -n \
+            --arg version "${{ steps.release.outputs.version }}" \
+            --arg url "${{ steps.release.outputs.url }}" \
+            --arg sha256 "${{ steps.sha.outputs.sha256 }}" \
+            '{version:$version,url:$url,sha256:$sha256}')
+
+          OLD=$(cat generated/hiddify.json | jq -c .)
+
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Write JSON
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          jq -n \
+            --arg version "${{ steps.release.outputs.version }}" \
+            --arg url "${{ steps.release.outputs.url }}" \
+            --arg sha256 "${{ steps.sha.outputs.sha256 }}" \
+            '{version:$version,url:$url,sha256:$sha256}' > generated/hiddify.json
+
+      - name: Build package
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          nix build .#hiddify
+
+      - name: Create Pull Request
+        if: steps.diff.outputs.changed == 'true'
+        id: pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: bump hiddify ${{ steps.release.outputs.version }}"
+          title: "Hiddify ${{ steps.release.outputs.version }}"
+          branch: hiddify-${{ steps.release.outputs.version }}
+          delete-branch: true
+
+      - name: Auto merge PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(gh pr list \
+            --head hiddify-${{ steps.release.outputs.version }} \
+            --json url -q '.[0].url')
+
+          gh pr merge "$PR_URL" --merge --delete-branch
