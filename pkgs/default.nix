@@ -16,6 +16,9 @@ let
     sha256 = json.sha256;
   };
 
+  appimage = appimageTools.makeAppImage {
+    inherit src;
+  };
 in
 appimageTools.wrapType2 {
   pname = "hiddify";
@@ -25,21 +28,19 @@ appimageTools.wrapType2 {
     pkgs: with pkgs; [
       libGL
       mesa
-      xorg.libX11
-      xorg.libXcursor
-      xorg.libXi
-      xorg.libXrandr
-      xorg.libXrender
-      xorg.libXtst
-      xorg.libxcb
-
+      libX11
+      libXcursor
+      libXi
+      libXrandr
+      libXrender
+      libXtst
+      libxcb
       gtk3
       glib
       cairo
       pango
       atk
       gdk-pixbuf
-
       libayatana-appindicator
       dbus
       nss
@@ -49,6 +50,42 @@ appimageTools.wrapType2 {
       libepoxy
       zstd
     ];
+
+  extraInstallCommands = ''
+        mkdir -p $out/share/applications
+        mkdir -p $out/share/icons/hicolor/512x512/apps
+
+        # desktop file
+        cat > $out/share/applications/hiddify.desktop <<EOF
+    [Desktop Entry]
+    Name=Hiddify
+    Comment=Hiddify client
+    Type=Application
+    Categories=Network;
+    Exec=hiddify
+    Icon=hiddify
+    Terminal=false
+    StartupNotify=true
+    EOF
+
+        # extract appimage (read-only safe)
+        tmp=$(mktemp -d)
+        cd $tmp
+
+        # AppImage extract
+        ${pkgs.appimage-run}/bin/appimage-run ${src} --appimage-extract >/dev/null 2>&1 || true
+
+        # find icon
+        icon=$(find squashfs-root -type f \( -iname "*.png" -o -iname "*.svg" \) | head -n 1 || true)
+
+        if [ -n "$icon" ]; then
+          install -Dm644 "$icon" \
+            $out/share/icons/hicolor/512x512/apps/hiddify.png
+        fi
+
+        cd /
+        rm -rf $tmp
+  '';
 
   meta = with lib; {
     description = "Hiddify client";

@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  inputs,
   ...
 }:
 
@@ -15,7 +16,7 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages = [
-      pkgs.hiddify
+      inputs.hiddify.packages.${pkgs.system}.hiddify
     ];
   };
 }
