@@ -1,4 +1,4 @@
-name: Update Hiddify (auto + build + auto-merge)
+name: Update Hiddify (auto + build + auto-commit)
 
 on:
   schedule:
@@ -17,26 +17,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl gh
-
-      - name: Get latest release
-        id: release
-        run: |
-          API="https://api.github.com/repos/hiddify/hiddify-app/releases/latest"
-
-          VERSION=$(curl -s $API | jq -r .tag_name)
-          URL="https://github.com/hiddify/hiddify-app/releases/download/${VERSION}/Hiddify-Linux-x64-AppImage.AppImage"
-
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "url=$URL" >> $GITHUB_OUTPUT
-
-      - name: Download AppImage
-        run: |
-          curl -L "${{ steps.release.outputs.url }}" -o appimage
+          sudo apt-get install -y jq curl gh git
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -44,11 +31,54 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
+      - name: Get latest release (robust)
+        id: release
+        run: |
+          API="https://api.github.com/repos/hiddify/hiddify-app/releases/latest"
+
+          DATA=$(curl -sL $API)
+
+          VERSION=$(echo "$DATA" | jq -r '.tag_name // .name // empty')
+          VERSION=${VERSION#v}
+
+          URL=$(echo "$DATA" | jq -r '
+            .assets[]
+            | select(.name | test("AppImage") and endswith(".AppImage"))
+            | .browser_download_url
+          ')
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "ERROR: version not found"
+            exit 1
+          fi
+
+          if [ -z "$URL" ] || [ "$URL" = "null" ] || [ "$URL" = "https://github.com/hiddify/hiddify-app/releases/download/v4.1.1/Hiddify-Linux-x64-AppImage.tar.gz" ]; then
+            # Попробуем найти .AppImage файл напрямую, а не .tar.gz
+            URL=$(echo "$DATA" | jq -r '
+              .assets[]
+              | select(.name | endswith(".AppImage") and startswith("Hiddify") and contains("Linux"))
+              | .browser_download_url
+            ')
+          fi
+
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "ERROR: download url not found"
+            exit 1
+          fi
+
+          # Properly escape special characters for GitHub Actions output
+          printf "version=%s\n" "$VERSION" >> $GITHUB_OUTPUT
+          printf "url=%s\n" "$(printf "%s" "$URL" | sed 's/%/%%/g')" >> $GITHUB_OUTPUT
+
+      - name: Download AppImage
+        run: |
+          curl -L "${{ steps.release.outputs.url }}" -o appimage
+
       - name: Compute sha256
         id: sha
         run: |
           SHA=$(nix hash file --type sha256 appimage)
-          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          printf "sha256=%s\n" "$SHA" >> $GITHUB_OUTPUT
 
       - name: Check if changed
         id: diff
@@ -59,7 +89,11 @@ jobs:
             --arg sha256 "${{ steps.sha.outputs.sha256 }}" \
             '{version:$version,url:$url,sha256:$sha256}')
 
-          OLD=$(cat generated/hiddify.json | jq -c .)
+          if [ -f "generated/hiddify.json" ]; then
+            OLD=$(cat generated/hiddify.json | jq -c .)
+          else
+            OLD=""
+          fi
 
           if [ "$NEW" = "$OLD" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
@@ -67,37 +101,26 @@ jobs:
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Write JSON
+      - name: Write JSON and update flake.lock
         if: steps.diff.outputs.changed == 'true'
         run: |
+          # Write new JSON data
+          mkdir -p generated
           jq -n \
             --arg version "${{ steps.release.outputs.version }}" \
             --arg url "${{ steps.release.outputs.url }}" \
             --arg sha256 "${{ steps.sha.outputs.sha256 }}" \
             '{version:$version,url:$url,sha256:$sha256}' > generated/hiddify.json
+          
+          # Update flake.lock after changing dependencies
+          nix flake lock
 
-      - name: Build package
+      - name: Commit and push changes to main
         if: steps.diff.outputs.changed == 'true'
         run: |
-          nix build .#hiddify
-
-      - name: Create Pull Request
-        if: steps.diff.outputs.changed == 'true'
-        id: pr
-        uses: peter-evans/create-pull-request@v6
-        with:
-          commit-message: "chore: bump hiddify ${{ steps.release.outputs.version }}"
-          title: "Hiddify ${{ steps.release.outputs.version }}"
-          branch: hiddify-${{ steps.release.outputs.version }}
-          delete-branch: true
-
-      - name: Auto merge PR
-        if: steps.diff.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_URL=$(gh pr list \
-            --head hiddify-${{ steps.release.outputs.version }} \
-            --json url -q '.[0].url')
-
-          gh pr merge "$PR_URL" --merge --delete-branch
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          git add generated/hiddify.json flake.lock
+          git commit -m "chore: bump hiddify ${{ steps.release.outputs.version }}"
+          git push origin main

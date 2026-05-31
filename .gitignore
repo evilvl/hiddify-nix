@@ -1,0 +1,11 @@
+# AppImage artifacts
+appimage
+*.AppImage
+
+# nix result symlink (если используешь nix build вне flake)
+result
+result-*
+
+# temporary files
+*.tmp
+*.log
